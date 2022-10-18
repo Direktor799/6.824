@@ -164,6 +164,8 @@ type RequestVoteReply struct {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	log.Printf("    n%v recv AppendEntries %v", rf.me, args)
 	reply.Term = rf.currentTerm
 	reply.Success = false
@@ -177,6 +179,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	log.Printf("    n%v recv RequestVote %v", rf.me, args)
 	// Your code here (2B).
 	reply.Term = rf.currentTerm
@@ -202,7 +206,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	// log.Printf("t%v: l%v send AppendEntries to n%v", rf.currentTerm, rf.me, server)
+	rf.mu.Lock()
+	log.Printf("t%v: l%v send AppendEntries to n%v", rf.currentTerm, rf.me, server)
+	rf.mu.Unlock()
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
@@ -235,7 +241,9 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	// log.Printf("t%v: n%v send RequeseVote to n%v", rf.currentTerm, rf.me, server)
+	rf.mu.Lock()
+	log.Printf("t%v: n%v send RequestVote to n%v", rf.currentTerm, rf.me, server)
+	rf.mu.Unlock()
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
@@ -281,71 +289,107 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+func (rf *Raft) isLeader() bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.leaderId == rf.me
+}
+
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
-		if rf.leaderId == rf.me {
-			time.Sleep(time.Duration(200 * 1e6))
-			args := &AppendEntriesArgs{}
-			args.LeaderId = rf.me
-			args.Term = rf.currentTerm
-			for i := range rf.peers {
-				if i != rf.me {
-					go func(i int) {
-						reply := &AppendEntriesReply{}
-						ok := rf.sendAppendEntries(i, args, reply)
-						if ok && !reply.Success {
-							log.Printf("t%v: l%v found newer term t%v", rf.currentTerm, rf.me, reply.Term)
-							rf.currentTerm = reply.Term
-							rf.leaderId = -1
-						}
-					}(i)
-				}
-			}
+		// timeout for AE request = heartbeat + random  ->  start election
+		rf.need_election.Store(true)
+		// time for RV response = heartbeat	->  next heartbeat or next election
+		time.Sleep(time.Duration(200 * 1e6))
+		if rf.isLeader() {
+			rf.sendHeartBeat()
 		} else {
-			rf.need_election.Store(true)
-			time.Sleep(time.Duration((400 + rand.Intn(200)) * 1e6))
-			// election needed
+			time.Sleep(time.Duration((100 + rand.Intn(200)) * 1e6))
 			if rf.need_election.Load() {
-				rf.currentTerm += 1
-				log.Printf("t%v: n%v start election", rf.currentTerm, rf.me)
-				last_log := &rf.log[len(rf.log)-1]
-				args := &RequestVoteArgs{}
-				args.Term = rf.currentTerm
-				args.CandidateId = rf.me
-				args.LastLogIndex = last_log.index
-				args.LastLogTerm = last_log.term
-				group := atomic.Int32{}
-				vote_num := atomic.Int32{}
-				vote_num.Add(1)
-				for i := range rf.peers {
-					if i != rf.me {
-						group.Add(1)
-						go func(i int) {
-							defer group.Add(-1)
-							reply := &RequestVoteReply{}
-							ok := rf.sendRequestVote(i, args, reply)
-							if ok && reply.VoteGranted {
-								vote_num.Add(1)
-							}
-							if ok && reply.Term > rf.currentTerm {
-								log.Printf("t%v: n%v found newer term t%v", rf.currentTerm, rf.me, reply.Term)
-							}
-						}(i)
-					}
-				}
-				for {
-					if int(vote_num.Load()) > len(rf.peers)/2 {
-						rf.leaderId = rf.me
-						log.Printf("t%v: l%v become leader with %v votes", rf.currentTerm, rf.me, int(vote_num.Load()))
-						break
-					}
-					if group.Load() == 0 {
-						break
-					}
-				}
+				go rf.startElection()
 			}
+		}
+	}
+}
+
+func (rf *Raft) sendHeartBeat() {
+	rf.mu.Lock()
+	args := &AppendEntriesArgs{}
+	args.LeaderId = rf.me
+	args.Term = rf.currentTerm
+	rf.mu.Unlock()
+	for i := range rf.peers {
+		if i != rf.me {
+			go func(i int) {
+				reply := &AppendEntriesReply{}
+				ok := rf.sendAppendEntries(i, args, reply)
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+				if ok && reply.Term > rf.currentTerm {
+					log.Printf("t%v: l%v found newer term t%v in heartbeat", rf.currentTerm, rf.me, reply.Term)
+					rf.currentTerm = reply.Term
+					rf.leaderId = -1
+				}
+			}(i)
+		}
+	}
+}
+
+func (rf *Raft) startElection() {
+	rf.mu.Lock()
+	log.Printf("t%v: n%v start election", rf.currentTerm, rf.me)
+	rf.currentTerm += 1
+	rf.votedFor = rf.me
+	last_log := &rf.log[len(rf.log)-1]
+	args := &RequestVoteArgs{}
+	args.Term = rf.currentTerm
+	args.CandidateId = rf.me
+	args.LastLogIndex = last_log.index
+	args.LastLogTerm = last_log.term
+	rf.mu.Unlock()
+	group := atomic.Int32{}
+	vote_num := atomic.Int32{}
+	vote_num.Add(1)
+	for i := range rf.peers {
+		if i != rf.me {
+			group.Add(1)
+			go func(i int) {
+				defer group.Add(-1)
+				reply := &RequestVoteReply{}
+				ok := rf.sendRequestVote(i, args, reply)
+				if ok && reply.VoteGranted {
+					vote_num.Add(1)
+				}
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+				if ok && reply.Term > rf.currentTerm {
+					log.Printf("t%v: n%v found newer term t%v in election", rf.currentTerm, rf.me, reply.Term)
+				}
+			}(i)
+		}
+	}
+	for {
+		rf.mu.Lock()
+		// anthor election already started
+		if rf.currentTerm != args.Term {
+			rf.mu.Unlock()
+			return
+		}
+		rf.mu.Unlock()
+
+		if int(vote_num.Load()) > len(rf.peers)/2 {
+			rf.mu.Lock()
+			rf.leaderId = rf.me
+			log.Printf("t%v: l%v become leader with %v votes", rf.currentTerm, rf.me, vote_num.Load())
+			rf.mu.Unlock()
+			break
+		} else if group.Load() == 0 {
+			rf.mu.Lock()
+			log.Printf("t%v: n%v stop election: %v votes", rf.currentTerm, rf.me, vote_num.Load())
+			rf.mu.Unlock()
+			break
 		}
 	}
 }
