@@ -20,6 +20,7 @@ package raft
 import (
 	//	"bytes"
 
+	"io/ioutil"
 	"log"
 	"math/rand"
 	"sync"
@@ -298,7 +299,7 @@ func (rf *Raft) isLeader() bool {
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
-	for rf.killed() == false {
+	for !rf.killed() {
 		// timeout for AE request = heartbeat + random  ->  start election
 		rf.need_election.Store(true)
 		// time for RV response = heartbeat	->  next heartbeat or next election
@@ -384,6 +385,7 @@ func (rf *Raft) startElection() {
 			rf.leaderId = rf.me
 			log.Printf("t%v: l%v become leader with %v votes", rf.currentTerm, rf.me, vote_num.Load())
 			rf.mu.Unlock()
+			rf.sendHeartBeat()
 			break
 		} else if group.Load() == 0 {
 			rf.mu.Lock()
@@ -420,7 +422,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	log.SetFlags(log.Lmicroseconds)
-	// log.SetOutput(ioutil.Discard)
+	log.SetOutput(ioutil.Discard)
 	log.Printf("t%v: n%v start", rf.currentTerm, rf.me)
 	go rf.ticker()
 
