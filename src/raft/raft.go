@@ -20,7 +20,6 @@ package raft
 import (
 	//	"bytes"
 
-	"io/ioutil"
 	"log"
 	"math/rand"
 	"sync"
@@ -186,6 +185,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2B).
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = false
+
 	// already voted in this term
 	if args.Term < rf.currentTerm {
 		log.Printf("    n%v do NOT vote for %v: term expired", rf.me, args.CandidateId)
@@ -195,11 +195,15 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		log.Printf("    n%v do NOT vote for %v: already voted", rf.me, args.CandidateId)
 		return
 	}
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.leaderId = -1
+	}
+
 	// check if the candidate's log is at least up-to-date as me
 	last_log := rf.log[len(rf.log)-1]
 	if args.LastLogTerm > last_log.term || (args.LastLogTerm == last_log.term && args.LastLogIndex >= last_log.index) {
 		rf.need_election.Store(false)
-		rf.currentTerm = args.Term
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 		log.Printf("    n%v vote for %v", rf.me, args.CandidateId)
@@ -422,7 +426,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	log.SetFlags(log.Lmicroseconds)
-	log.SetOutput(ioutil.Discard)
+	// log.SetOutput(ioutil.Discard)
 	log.Printf("t%v: n%v start", rf.currentTerm, rf.me)
 	go rf.ticker()
 
