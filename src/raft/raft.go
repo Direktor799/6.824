@@ -329,14 +329,17 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 }
 
 func (rf *Raft) sendLogs() {
+	// fixing term and leaderid, otherwise it could sending wrong logs with updated term after found newer term in reply
+	fixedTerm := rf.currentTerm
+	fixedLeaderId := rf.me
 	for i := range rf.peers {
 		if i != rf.me {
 			go func(i int) {
 				for {
 					rf.mu.Lock()
 					args := &AppendEntriesArgs{}
-					args.Term = rf.currentTerm
-					args.LeaderId = rf.me
+					args.Term = fixedTerm
+					args.LeaderId = fixedLeaderId
 					args.PrevLogIndex = rf.nextIndex[i] - 1
 					args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
 					args.Entries = rf.log[rf.nextIndex[i]:]
@@ -350,7 +353,6 @@ func (rf *Raft) sendLogs() {
 						break
 					}
 
-					// lock the entire block, incase of update term than rollback e.g.
 					rf.mu.Lock()
 					if reply.Success {
 						rf.nextIndex[i] = len(rf.log)
