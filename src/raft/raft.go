@@ -384,43 +384,48 @@ func (rf *Raft) sendLogs() {
 						rf.matchIndex[i] = args.PrevLogIndex + len(args.Entries)
 						rf.update()
 						rf.mu.Unlock()
+						// success
 						break
-					} else {
-						// failed due to unmatched logs, retry
-						// two possible ways for AppendEntries to reply false:
-						//	1. leader's term is expired
-						//	2. log unmatched
-						if rf.currentTerm < reply.Term {
+					}
+
+					//	1. leader's term is expired
+					if fixedTerm < reply.Term {
+						if rf.currentTerm != reply.Term {
 							log.Printf("t%v: l%v found newer term in AE reply t%v", rf.currentTerm, rf.me, reply.Term)
 							rf.currentTerm = reply.Term
 							rf.persist()
 							rf.leaderId = -1
-							rf.mu.Unlock()
-							break
+						}
+						rf.mu.Unlock()
+						// found newer term, become follower
+						break
+					}
+
+					//	2. log unmatched
+					if rf.nextIndex[i]-1 == args.PrevLogIndex && rf.leaderId == rf.me {
+						// failed due to unmatched logs, retry
+						// retry if it's not modified, otherwise an other sendLog is doing samething but faster
+						// also make sure i am the leader
+						if reply.Xlen != -1 {
+							// log not found, send all extra logs
+							rf.nextIndex[i] = reply.Xlen
 						} else {
-							// retry if it's not modified, otherwise an other sendLog is doing samething but faster
-							// also make sure i am the leader
-							if rf.nextIndex[i]-1 == args.PrevLogIndex && rf.leaderId == rf.me { // TODO
-								if reply.Xlen != -1 {
-									// log not found, send all extra logs
-									rf.nextIndex[i] = reply.Xlen
-								} else {
-									// log found, but there's conflict, let's start with Xindex
-									for nextIndex := reply.Xindex; nextIndex < len(rf.log); nextIndex++ {
-										rf.nextIndex[i] = nextIndex
-										if rf.log[nextIndex].Term != reply.Xterm {
-											break
-										}
-									}
+							// log found, but there's conflict, let's start with Xindex
+							for nextIndex := reply.Xindex; nextIndex < len(rf.log); nextIndex++ {
+								rf.nextIndex[i] = nextIndex
+								if rf.log[nextIndex].Term != reply.Xterm {
+									break
 								}
-								log.Printf("t%v: l%v found unmatched log for n%v, rollback to %v and retry", rf.currentTerm, rf.me, i, rf.nextIndex[i])
-							} else {
-								rf.mu.Unlock()
-								break
 							}
 						}
+						log.Printf("t%v: l%v found unmatched log for n%v, rollback to %v and retry", rf.currentTerm, rf.me, i, rf.nextIndex[i])
+						rf.mu.Unlock()
+						continue
+					} else {
+						rf.mu.Unlock()
+						// not success & not leader anymore
+						break
 					}
-					rf.mu.Unlock()
 				}
 			}(i)
 		}
@@ -500,15 +505,16 @@ func (rf *Raft) ticker() {
 			rf.mu.Unlock()
 		} else {
 			time.Sleep(time.Duration((100 + rand.Intn(200)) * 1e6))
+			rf.mu.Lock()
 			if rf.need_election.Load() {
 				rf.startElection()
 			}
+			rf.mu.Unlock()
 		}
 	}
 }
 
 func (rf *Raft) startElection() {
-	rf.mu.Lock()
 	log.Printf("t%v: n%v start election", rf.currentTerm, rf.me)
 	rf.currentTerm += 1
 	rf.votedFor = rf.me
@@ -519,7 +525,6 @@ func (rf *Raft) startElection() {
 	args.CandidateId = rf.me
 	args.LastLogIndex = len(rf.log) - 1
 	args.LastLogTerm = last_log.Term
-	rf.mu.Unlock()
 	vote_num := atomic.Int32{}
 	vote_num.Add(1)
 	for i := range rf.peers {
