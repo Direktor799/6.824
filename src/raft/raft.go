@@ -465,7 +465,9 @@ func (rf *Raft) ticker() {
 		// time for RV response = heartbeat	->  next heartbeat or next election
 		time.Sleep(time.Duration(200 * 1e6))
 		if rf.isLeader() {
+			rf.mu.Lock()
 			rf.sendLogs()
+			rf.mu.Unlock()
 		} else {
 			time.Sleep(time.Duration((100 + rand.Intn(200)) * 1e6))
 			if rf.need_election.Load() {
@@ -527,8 +529,8 @@ func (rf *Raft) startElection() {
 			}
 			rf.matchIndex = make([]int, len(rf.peers))
 			log.Printf("t%v: l%v become leader with %v votes", rf.currentTerm, rf.me, vote_num.Load())
-			rf.mu.Unlock()
 			rf.sendLogs()
+			rf.mu.Unlock()
 			break
 		} else if group.Load() == 0 {
 			rf.mu.Lock()
