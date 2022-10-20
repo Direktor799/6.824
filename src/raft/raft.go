@@ -154,6 +154,11 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+
+	// optimize rollback efficiency
+	Xterm  int
+	Xindex int
+	Xlen   int
 }
 
 // example RequestVote RPC arguments structure.
@@ -178,6 +183,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	log.Printf("    n%v recv AppendEntries %v", rf.me, args)
 	reply.Term = rf.currentTerm
 	reply.Success = false
+	reply.Xterm = -1
+	reply.Xindex = -1
+	reply.Xlen = -1
 	if args.Term >= rf.currentTerm {
 		// heartbeat update
 		rf.need_election.Store(false)
@@ -193,6 +201,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				log.Printf("    n%v disagree with prev log i%v, delete logs", rf.me, args.PrevLogIndex)
 				rf.log = rf.log[:args.PrevLogIndex]
 				rf.persist()
+				reply.Xterm = rf.log[len(rf.log)-1].Term
+				reply.Xindex = len(rf.log) - 1
+				for i := len(rf.log) - 1; i >= 0; i-- {
+					if rf.log[i].Term == reply.Xterm {
+						reply.Xindex = i
+					} else {
+						break
+					}
+				}
 			} else {
 				// agreed, append logs really really carefully
 				// possible situation:
@@ -224,6 +241,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				}
 			}
 		} else {
+			reply.Xlen = len(rf.log)
 			log.Printf("    n%v do NOT found prev log i%v", rf.me, args.PrevLogIndex)
 		}
 	}
@@ -380,8 +398,19 @@ func (rf *Raft) sendLogs() {
 						} else {
 							// retry if it's not modified, otherwise an other sendLog is doing samething but faster
 							// also make sure i am the leader
-							if rf.nextIndex[i]-1 == args.PrevLogIndex && rf.leaderId == rf.me {
-								rf.nextIndex[i] -= 1
+							if rf.nextIndex[i]-1 == args.PrevLogIndex && rf.leaderId == rf.me { // TODO
+								if reply.Xlen != -1 {
+									// log not found, send all extra logs
+									rf.nextIndex[i] = reply.Xlen
+								} else {
+									// log found, but there's conflict, let's start with Xindex
+									for nextIndex := reply.Xindex; nextIndex < len(rf.log); nextIndex++ {
+										rf.nextIndex[i] = nextIndex
+										if rf.log[nextIndex].Term != reply.Xterm {
+											break
+										}
+									}
+								}
 								log.Printf("t%v: l%v found unmatched log for n%v, rollback to %v and retry", rf.currentTerm, rf.me, i, rf.nextIndex[i])
 							} else {
 								rf.mu.Unlock()
