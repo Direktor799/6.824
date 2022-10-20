@@ -238,6 +238,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 						rf.commitIndex = len(rf.log) - 1
 					}
 					log.Printf("    n%v update commit index to i%v", rf.me, rf.commitIndex)
+					rf.commit()
 				}
 			}
 		} else {
@@ -381,6 +382,7 @@ func (rf *Raft) sendLogs() {
 					if reply.Success {
 						rf.nextIndex[i] = len(rf.log)
 						rf.matchIndex[i] = args.PrevLogIndex + len(args.Entries)
+						rf.update()
 						rf.mu.Unlock()
 						break
 					} else {
@@ -450,38 +452,37 @@ func (rf *Raft) isLeader() bool {
 	return rf.leaderId == rf.me
 }
 
-func (rf *Raft) updater() {
-	for !rf.killed() {
-		rf.mu.Lock()
-		if rf.leaderId == rf.me {
-			for n := len(rf.log) - 1; n > rf.commitIndex; n-- {
-				peer_num := 1
-				for i, v := range rf.matchIndex {
-					if i != rf.me {
-						if v >= n {
-							peer_num += 1
-						}
-					}
-				}
-				if peer_num > len(rf.peers)/2 && rf.log[n].Term == rf.currentTerm {
-					rf.commitIndex = n
-					log.Printf("t%v: l%v inc commit index to i%v", rf.currentTerm, rf.me, rf.commitIndex)
-					break
+// call this when matchIndex is updated (leader only)
+func (rf *Raft) update() {
+	for n := len(rf.log) - 1; n > rf.commitIndex; n-- {
+		peer_num := 1
+		for i, v := range rf.matchIndex {
+			if i != rf.me {
+				if v >= n {
+					peer_num += 1
 				}
 			}
 		}
-		for rf.lastApplied < rf.commitIndex {
-			rf.lastApplied += 1
-			msg := ApplyMsg{}
-			msg.CommandValid = true
-			msg.Command = rf.log[rf.lastApplied].Command
-			msg.CommandIndex = rf.lastApplied
-			log.Printf("t%v: n%v commit i%v: %v", rf.currentTerm, rf.me, msg.CommandIndex, msg.Command)
-			rf.applyCh <- msg
+		if peer_num > len(rf.peers)/2 && rf.log[n].Term == rf.currentTerm {
+			rf.commitIndex = n
+			log.Printf("t%v: l%v inc commit index to i%v", rf.currentTerm, rf.me, rf.commitIndex)
+			rf.commit()
+			rf.sendLogs()
+			break
 		}
-		log.Printf("t%v: n%v STATUS: log len: %v, last apply: i%v, leader: %v --------------", rf.currentTerm, rf.me, len(rf.log), rf.lastApplied, rf.leaderId)
-		rf.mu.Unlock()
-		time.Sleep(time.Duration(200 * 1e6))
+	}
+}
+
+// call this when commit index is updated
+func (rf *Raft) commit() {
+	for rf.lastApplied < rf.commitIndex {
+		rf.lastApplied += 1
+		msg := ApplyMsg{}
+		msg.CommandValid = true
+		msg.Command = rf.log[rf.lastApplied].Command
+		msg.CommandIndex = rf.lastApplied
+		log.Printf("t%v: n%v commit i%v: %v", rf.currentTerm, rf.me, msg.CommandIndex, msg.Command)
+		rf.applyCh <- msg
 	}
 }
 
@@ -599,8 +600,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-	// start updater goroutine to commit
-	go rf.updater()
 
 	return rf
 }
