@@ -107,6 +107,9 @@ func (rf *Raft) persist() {
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
+		rf.currentTerm = 0
+		rf.votedFor = -1
+		rf.log = make([]LogEntry, 1)
 		return
 	}
 	r := bytes.NewBuffer(data)
@@ -219,12 +222,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				// resize log
 				if sync_log_len > len(rf.log) {
 					rf.log = append(rf.log, make([]LogEntry, sync_log_len-len(rf.log))...)
-					rf.persist()
 				}
 				// just copy
 				for i, v := range args.Entries {
 					rf.log[args.PrevLogIndex+1+i] = v
 				}
+				rf.persist()
 				if len(args.Entries) != 0 {
 					log.Printf("    n%v agree with prev log i%v, append logs", rf.me, args.PrevLogIndex)
 				}
@@ -575,6 +578,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.log = make([]LogEntry, 1)
 	rf.leaderId = -1
