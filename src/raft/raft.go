@@ -501,7 +501,7 @@ func (rf *Raft) ticker() {
 		} else {
 			time.Sleep(time.Duration((100 + rand.Intn(200)) * 1e6))
 			if rf.need_election.Load() {
-				go rf.startElection()
+				rf.startElection()
 			}
 		}
 	}
@@ -520,53 +520,37 @@ func (rf *Raft) startElection() {
 	args.LastLogIndex = len(rf.log) - 1
 	args.LastLogTerm = last_log.Term
 	rf.mu.Unlock()
-	group := atomic.Int32{}
 	vote_num := atomic.Int32{}
 	vote_num.Add(1)
 	for i := range rf.peers {
 		if i != rf.me {
-			group.Add(1)
 			go func(i int) {
-				defer group.Add(-1)
 				reply := &RequestVoteReply{}
 				ok := rf.sendRequestVote(i, args, reply)
-				if ok && reply.VoteGranted {
+				if !ok {
+					return
+				}
+				if reply.VoteGranted {
 					vote_num.Add(1)
 				}
+
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
-				if ok && reply.Term > rf.currentTerm {
+				if reply.Term > rf.currentTerm {
 					log.Printf("t%v: n%v found newer term t%v in election", rf.currentTerm, rf.me, reply.Term)
 				}
+				// become leader (first time got majority votes)
+				if rf.leaderId != rf.me && int(vote_num.Load()) > len(rf.peers)/2 {
+					rf.leaderId = rf.me
+					rf.nextIndex = make([]int, len(rf.peers))
+					for i := range rf.nextIndex {
+						rf.nextIndex[i] = len(rf.log)
+					}
+					rf.matchIndex = make([]int, len(rf.peers))
+					log.Printf("t%v: l%v become leader with %v votes", rf.currentTerm, rf.me, vote_num.Load())
+					rf.sendLogs()
+				}
 			}(i)
-		}
-	}
-	for {
-		rf.mu.Lock()
-		// anthor election already started
-		if rf.currentTerm != args.Term {
-			rf.mu.Unlock()
-			return
-		}
-		rf.mu.Unlock()
-
-		if int(vote_num.Load()) > len(rf.peers)/2 {
-			rf.mu.Lock()
-			rf.leaderId = rf.me
-			rf.nextIndex = make([]int, len(rf.peers))
-			for i := range rf.nextIndex {
-				rf.nextIndex[i] = len(rf.log)
-			}
-			rf.matchIndex = make([]int, len(rf.peers))
-			log.Printf("t%v: l%v become leader with %v votes", rf.currentTerm, rf.me, vote_num.Load())
-			rf.sendLogs()
-			rf.mu.Unlock()
-			break
-		} else if group.Load() == 0 {
-			rf.mu.Lock()
-			log.Printf("t%v: n%v stop election: %v votes", rf.currentTerm, rf.me, vote_num.Load())
-			rf.mu.Unlock()
-			break
 		}
 	}
 }
