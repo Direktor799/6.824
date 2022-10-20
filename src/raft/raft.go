@@ -367,7 +367,7 @@ func (rf *Raft) sendLogs() {
 					args.LeaderId = fixedLeaderId
 					args.PrevLogIndex = rf.nextIndex[i] - 1
 					args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
-					args.Entries = rf.log[rf.nextIndex[i]:]
+					args.Entries = append([]LogEntry{}, rf.log[rf.nextIndex[i]:]...)
 					args.LeaderCommit = rf.commitIndex
 					rf.mu.Unlock()
 					reply := &AppendEntriesReply{}
